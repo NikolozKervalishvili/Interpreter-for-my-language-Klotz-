@@ -13,5 +13,5 @@ fn main() {
     let s = fs::read_to_string("src/input.txt").expect("file not found");
     let mut lexer = Lexer::new(&s);
     dbg!(&lexer.lex());
-    // dbg!(lexer);
+    dbg!("fadsd");
 }
