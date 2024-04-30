@@ -6,7 +6,7 @@ pub type LexResult<T> = Result<T, LexError>;
 
 #[derive(Debug)]
 pub struct Lexer<'a> {
-    // the txt input
+    // the txt input as an peekable iterator
     source: Peekable<Chars<'a>>,
     // raw character pos
     pos: usize,
@@ -27,6 +27,12 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /*
+        -- method overloading --
+        [self.source.next()] => self.next()
+        [self.source.next_if()] => self.next_if()
+        so [self.pos] and can be updated
+    */
     fn next(&mut self) -> Option<char> {
         let n = self.source.next();
         if n.is_some() {
@@ -42,12 +48,19 @@ impl<'a> Lexer<'a> {
         }
         n
     }
+    // ----
 
+    /*
+        main method of the lexer
+        the lexer creates the tokenstream for the
+        next step, the parser
+    */
     pub fn lex(&mut self) -> LexResult<Vec<Token>> {
         let mut tokens = Vec::new();
+        // [self.next()] increases [self.pos]
         while let Some(c) = self.next() {
             let token = match c {
-                '0'..='9' => self.take_int(c)?,
+                '0'..='9' => self.take_number(c)?,
                 // symbols which u can combine with '=' at the end
                 '+' | '=' | '-' | '*' | '/' | '<' | '>' => self.take_operator(c),
                 // symbols where u cant
@@ -57,7 +70,9 @@ impl<'a> Lexer<'a> {
                     self.token_pos,
                     self.line,
                 ),
+                // closings
                 ')' | ']' | '}' => self.take_precedence(c)?,
+                // opening
                 '(' | '[' | '{' => {
                     self.bracket_stack.push(c);
                     Token::new(
@@ -68,6 +83,11 @@ impl<'a> Lexer<'a> {
                     )
                 }
                 ' ' => continue,
+                /*
+                    windows uses \r\n for a newline,
+                    so \r and \n decrement [self.pos],
+                    because a newline is not included in the raw pos
+                */
                 '\r' => {
                     self.pos -= 1;
                     continue;
@@ -79,12 +99,14 @@ impl<'a> Lexer<'a> {
                 }
                 '"' | '\'' => self.take_string(c)?,
                 c if c.is_alphabetic() => self.take_keyword(c),
+                // the chars not implemented yet, e.g. &
                 other => panic!("not yet implementet: {other}"),
             };
             self.token_pos += 1;
             tokens.push(token);
             // check for open brackets
         }
+        // if the stack is not empty, an opening is unclosed
         if !self.bracket_stack.is_empty() {
             return Err(LexError::OpenBracketLeft(
                 *self.bracket_stack.last().unwrap(),
@@ -93,13 +115,21 @@ impl<'a> Lexer<'a> {
         Ok(tokens)
     }
 
-    fn take_int(&mut self, c: char) -> LexResult<Token> {
+    fn take_number(&mut self, c: char) -> LexResult<Token> {
+        // consumes until non alphanumeric char (excluding dot for floats)
         let value = once(c)
-            .chain(from_fn(|| self.source.next_if(|c| c.is_alphanumeric())))
+            .chain(from_fn(|| {
+                self.source.next_if(|c| c.is_alphanumeric() || *c == '.')
+            }))
             .collect::<String>();
+        // try to parse to float to check if value is a number
         match value.parse::<f64>() {
             Ok(num) => Ok(Token::new(
-                TokenType::Float,
+                if value.parse::<u32>().is_ok() {
+                    TokenType::Int
+                } else {
+                    TokenType::Float
+                },
                 num.to_string(),
                 self.token_pos,
                 self.line,
@@ -108,6 +138,10 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /*
+        consumes until quotationmark is consumed again
+        possible quotation marks: " and '
+    */
     fn take_string(&mut self, c: char) -> LexResult<Token> {
         let value = from_fn(|| self.next_if(|&ch| ch != c)).collect();
         if self.next().is_none() {
@@ -121,15 +155,16 @@ impl<'a> Lexer<'a> {
         ))
     }
 
-    // if keyword not found it takes it as variable
     fn take_keyword(&mut self, c: char) -> Token {
         let value = once(c)
             .chain(from_fn(|| self.next_if(|&ch| ch.is_alphanumeric())))
             .collect::<String>();
         match value.as_ref() {
+            // keywords implemented yet
             "if" | "else" | "let" => {
                 Token::new(TokenType::Keyword, value, self.token_pos, self.line)
             }
+            // if keyword not found it takes it as variable
             _ => Token::new(TokenType::Variable, value, self.token_pos, self.line),
         }
     }
@@ -143,6 +178,10 @@ impl<'a> Lexer<'a> {
         )
     }
 
+    /*
+        match last openening from stack [self.bracket_stack]
+        with the top of the stack, if matching: pop the top of the stack
+    */
     fn take_precedence(&mut self, c: char) -> LexResult<Token> {
         if self.bracket_stack.last()
             != match c {
@@ -167,7 +206,7 @@ impl<'a> Lexer<'a> {
 #[derive(Debug)]
 pub struct Token {
     pub _type: TokenType,
-    value: String,
+    value: String, // content of the token, e.g. "12"
     // token pos from the lexer struct
     pos: usize,
     line: usize,
@@ -206,14 +245,33 @@ pub enum LexError {
 impl fmt::Debug for LexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            /*
+                marks all non digit chars with a star,
+                exception: the first dot
+                TODO: make this more compact
+            */
             LexError::InvalidNumber(s) => {
-                write!(f, "The stars mark the wrong chars: \n")?;
-                write!(f, "{}\n", s)?;
+                // iterator which only consumes first item (first dot)
+                let mut first_dot_pos = s
+                    .chars()
+                    .enumerate()
+                    .filter(|(_, c)| *c == '.')
+                    .map(|t| t.0)
+                    .take(1);
+                writeln!(f, "The stars mark the wrong chars: ")?;
+                writeln!(f, "{}", s)?;
                 write!(
                     f,
                     "{}",
                     s.chars()
-                        .map(|c| if c.is_alphabetic() { '*' } else { ' ' })
+                        .enumerate()
+                        .map(|(i, c)| {
+                            if c.is_alphabetic() || c == '.' && Some(i) != first_dot_pos.next() {
+                                '*'
+                            } else {
+                                ' '
+                            }
+                        })
                         .collect::<String>()
                 )?;
             }
